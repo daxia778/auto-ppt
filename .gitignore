@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+.venv/
+venv/
+env/
+
+# Chrome profile (contains login cookies - DO NOT commit)
+chrome_profile/
+
+# Output files
+output/*.pptx
+output/*.pdf
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Test files
+test_*.py
+!tests/
+
+# Temp
+*.tmp
+*.log

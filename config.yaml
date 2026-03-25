@@ -1,0 +1,65 @@
+# NotebookLM PPT Generator 配置文件
+
+# 浏览器配置
+browser:
+  user_data_dir: "./chrome_profile"
+  headless: false
+  slow_mo: 500
+  download_dir: "D:\\notebooklm-ppt-generator\\output"
+
+# NotebookLM 配置
+notebooklm:
+  url: "https://notebooklm.google.com/"
+  timeout: 120000
+  response_timeout: 180000
+
+# Studio 面板配置
+studio:
+  generation_timeout: 180000   # 演示文稿生成超时 (3分钟)
+  poll_interval: 3000          # 轮询间隔
+  download_wait: 10000         # 下载等待时间
+
+# PPT 配置
+ppt:
+  output_dir: "./output"
+  theme:
+    primary_color: "2B579A"
+    accent_color: "217346"
+    background_color: "FFFFFF"
+    text_color: "333333"
+    light_bg: "F5F5F5"
+  font:
+    title: "Microsoft YaHei"
+    body: "Microsoft YaHei"
+    fallback: "Arial"
+
+# Prompt 模板
+prompts:
+  generate_outline: |
+    请帮我生成一个关于「{topic}」的PPT大纲，共 {pages} 页。
+
+    请严格按照以下格式输出，不要添加其他内容：
+
+    ## 第1页
+    **标题**: [页面标题]
+    **要点**:
+    - [要点1]
+    - [要点2]
+    - [要点3]
+    **备注**: [演讲备注/补充说明]
+
+    ## 第2页
+    **标题**: [页面标题]
+    **要点**:
+    - [要点1]
+    - [要点2]
+    - [要点3]
+    **备注**: [演讲备注/补充说明]
+
+    ...以此类推，直到第{pages}页。
+
+    要求：
+    1. 内容要专业、有深度
+    2. 每页3-5个要点
+    3. 第1页为封面/标题页，最后一页为总结页
+    4. 备注部分写演讲时的口头说明
