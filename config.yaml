@@ -18,6 +18,7 @@ studio:
   generation_timeout: 180000   # 演示文稿生成超时 (3分钟)
   poll_interval: 3000          # 轮询间隔
   download_wait: 10000         # 下载等待时间
+  retry_count: 2               # 生成失败后重试次数
 
 # PPT 配置
 ppt:

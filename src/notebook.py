@@ -157,9 +157,13 @@ class NotebookManager:
         except Exception as e:
             raise NotebookError(f"交互失败: {str(e)}")
 
+    def _log_progress(self, msg: str):
+        """统一的进度日志打印"""
+        print(f"[Studio] {msg}")
+
     async def generate_studio_presentation(self):
         """在 Studio 面板点击生成演示文稿"""
-        print("\n[Studio] 准备生成演示文稿...")
+        self._log_progress("\n准备生成演示文稿...")
         try:
             # 找到 Studio 面板中的“演示文稿”按钮
             presentation_btn_selectors = [
@@ -178,60 +182,82 @@ class NotebookManager:
                         await btn.scroll_into_view_if_needed()
                         await btn.click()
                         clicked = True
-                        print("[Studio] 已点击「演示文稿」按钮，开始生成")
+                        self._log_progress("已点击「演示文稿」按钮，触发生成指令")
                         break
                 except TimeoutError:
                     continue
                     
             if not clicked:
                 raise NotebookError("无法在 Studio 面板找到「演示文稿」按钮")
+            
+            # 处理可能的“确认生成”对话框
+            try:
+                confirm_btns = [
+                    "button:has-text('生成')", 
+                    "button:has-text('确认')",
+                    "button:has-text('Generate')",
+                    "button:has-text('Confirm')"
+                ]
+                for c_selector in confirm_btns:
+                    confirm_btn = await self.page.query_selector(c_selector)
+                    if confirm_btn and await confirm_btn.is_visible():
+                        await confirm_btn.click()
+                        self._log_progress("已点击弹窗的确认生成按钮")
+                        break
+            except Exception:
+                pass # 没有弹窗是正常的
                 
         except Exception as e:
             raise NotebookError(f"触发演示文稿生成失败: {str(e)}")
 
     async def wait_for_presentation_ready(self) -> bool:
         """等待演示文稿生成完成 (可能需要 1-3 分钟)"""
-        print("[Studio] 等待 AI 生成 PPT，这通常需要 1-2 分钟，请耐心等待...")
+        self._log_progress("等待 AI 生成 PPT，这通常需要 1-2 分钟，请耐心等待...")
         
         # 从配置中获取超时时间
         studio_config = self.config.get("studio", {}) if isinstance(self.config, dict) else {}
         timeout_ms = studio_config.get("generation_timeout", 180000)
+        poll_interval = studio_config.get("poll_interval", 3000)
+        
+        more_options_selector = "button[aria-label='更多选项'], button[aria-label='More options']"
+        
+        self._log_progress(f"最大等待时间: {timeout_ms/1000} 秒")
+        
+        elapsed = 0
+        last_log_time = 0
         
         try:
-            # 等待生成中的提示消失或者出现完成的卡片选项
-            # 正在生成时通常会有 "正在生成演示文稿..." 的提示
-            
-            # 我们通过判断 "更多选项" (编辑/分享/下载) 按钮是否出现来确定是否生成完毕
-            # 这比监控 loading 状态更可靠
-            more_options_selector = "button[aria-label='更多选项'], button[aria-label='More options']"
-            
-            print(f"[Studio] 最长等待时间: {timeout_ms/1000} 秒")
-            
-            # 使用更长的超时时间等待完成动作的按钮出现
-            btn = await self.page.wait_for_selector(
-                more_options_selector, 
-                timeout=timeout_ms,
-                state="visible"
-            )
-            
-            if btn:
-                print("[Studio] 演示文稿生成完毕！")
-                # 等待动画完全渲染和稳定
-                await self.page.wait_for_timeout(3000)
-                return True
+            # 手动轮询以便打印进度
+            while elapsed < timeout_ms:
+                # 检查按钮是否出现
+                btn_visible = await self.page.evaluate(
+                    f"!!document.querySelector(\"{more_options_selector}\")"
+                )
                 
-        except TimeoutError:
-            print("[Studio] [FAIL] 等待生成超时。")
-            return False
-        except Exception as e:
-            print(f"[Studio] [ERROR] 检查生成状态时出错: {str(e)}")
+                if btn_visible:
+                    self._log_progress("[OK] 演示文稿生成完毕！")
+                    await self.page.wait_for_timeout(3000) # 等待动画动画稳定
+                    return True
+                
+                # 每隔 10 秒打印一次进度日志，避免刷屏
+                if elapsed - last_log_time >= 10000:
+                    self._log_progress(f"已等待 {elapsed/1000} 秒，正在持续生成中...")
+                    last_log_time = elapsed
+                    
+                await self.page.wait_for_timeout(poll_interval)
+                elapsed += poll_interval
+                
+            self._log_progress("[FAIL] 等待生成超时。")
             return False
             
-        return False
+        except Exception as e:
+            self._log_progress(f"[ERROR] 检查生成状态时出错: {str(e)}")
+            return False
 
-    async def download_presentation(self) -> str:
+    async def download_presentation(self, dest_dir: str = "./output") -> str:
         """打开菜单并点击下载 PowerPoint"""
-        print("[Studio] 准备下载 PPTX 文件...")
+        self._log_progress("准备下载 PPTX 文件...")
+        import os
         try:
             # 1. 点击“更多选项” (⋯) 按钮
             more_options_selector = "button[aria-label='更多选项'], button[aria-label='More options']"
@@ -242,22 +268,23 @@ class NotebookManager:
                 
             await more_btn.hover()
             await more_btn.click()
-            print("[Studio] 已打开操作菜单")
+            self._log_progress("已打开操作菜单")
             
             # 等待菜单渲染
             await self.page.wait_for_timeout(1500)
             
             # 2. 找到并点击 "下载 PowerPoint (.pptx)" 选项
-            # 兼容中英文界面的菜单项选择器
             download_selectors = [
                 "button[role='menuitem']:has-text('PowerPoint')",
                 "button[role='menuitem']:has-text('.pptx')",
                 ".mat-mdc-menu-item:has-text('PowerPoint')"
             ]
             
+            studio_config = self.config.get("studio", {}) if isinstance(self.config, dict) else {}
+            download_wait = studio_config.get("download_wait", 30000)
+            
             # 准备接管下载事件
-            # Playwright 提供 context.expect_download() 来处理下载
-            async with self.page.expect_download(timeout=30000) as download_info:
+            async with self.page.expect_download(timeout=download_wait) as download_info:
                 clicked = False
                 for selector in download_selectors:
                     try:
@@ -265,13 +292,13 @@ class NotebookManager:
                         if menu_item:
                             await menu_item.click()
                             clicked = True
-                            print("[Studio] 已点击下载按钮")
+                            self._log_progress("已点击下载 PowerPoint 按钮")
                             break
                     except TimeoutError:
                         continue
                 
                 if not clicked:
-                    # Fallback: 如果精确选择器失效，尝试用 JS 查找包含 "PowerPoint" 文本的节点
+                    # Fallback
                     await self.page.evaluate('''() => {
                         const items = Array.from(document.querySelectorAll('[role="menuitem"], .mat-mdc-menu-item'));
                         const pptItem = items.find(el => el.textContent.includes('PowerPoint') || el.textContent.includes('pptx'));
@@ -280,17 +307,20 @@ class NotebookManager:
                     
             download = await download_info.value
             
-            # 获取配置好的下载目录，如果没有则使用当前目录的 output/
-            # 实际保存路径已经在 auth.py 的 download_dir 中配置
-            # 这里是为了打印和返回确切的最终完成路径
             suggested_filename = download.suggested_filename
-            print(f"[Studio] 检测到下载任务: {suggested_filename}")
+            self._log_progress(f"检测到下载任务: {suggested_filename}")
             
-            # 等待下载完全结束
-            final_path = await download.path()
-            print(f"[Studio] [OK] 下载成功! 临时文件路径: {final_path}")
+            # 直接使用 download.save_as 保存到最终绝对路径，这比拷贝临时文件更稳
+            os.makedirs(dest_dir, exist_ok=True)
+            final_path = os.path.abspath(os.path.join(dest_dir, suggested_filename))
             
-            return str(final_path)
+            # 这一步会等待文件完全写入盘
+            await download.save_as(final_path)
             
+            self._log_progress(f"[OK] 文件已保存至: {final_path}")
+            return final_path
+            
+        except TimeoutError:
+             raise NotebookError("下载超时：服务器未能及时响应或网络断开")
         except Exception as e:
             raise NotebookError(f"下载 PPT 失败: {str(e)}")

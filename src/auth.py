@@ -32,6 +32,7 @@ class AuthManager:
             viewport={"width": 1280, "height": 900},
             locale="zh-CN",
             accept_downloads=True,
+            downloads_path=os.path.abspath(self.download_dir),
             args=[
                 "--disable-blink-features=AutomationControlled",
                 "--no-sandbox",

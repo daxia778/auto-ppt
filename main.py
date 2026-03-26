@@ -7,6 +7,7 @@ import argparse
 import sys
 import yaml
 import os
+import time
 
 from src.auth import AuthManager
 from src.notebook import NotebookManager
@@ -49,6 +50,8 @@ async def run_ppt_generation(args):
         print("  >>> 启动 NotebookLM PPT Generator")
         print("="*50 + "\n")
         
+        start_time = time.time()
+        
         # 1. 启动浏览器 & 确保登录
         context = await auth_manager.launch_browser()
         page = context.pages[0] if context.pages else await context.new_page()
@@ -88,15 +91,40 @@ async def run_ppt_generation(args):
         if args.use_studio:
             # 流程 A: 使用官方 Studio 面板生成演示文稿
             print("\n[模式] 启用官方 Studio 生成模式")
-            await notebook_mgr.generate_studio_presentation()
-            ready = await notebook_mgr.wait_for_presentation_ready()
             
-            if not ready:
-                print("\n[FAIL] 演示文稿生成失败或超时")
+            studio_config = config.get("studio", {})
+            max_retries = studio_config.get("retry_count", 1) + 1
+            output_dir = os.path.abspath(config.get("ppt", {}).get("output_dir", "./output"))
+            
+            success = False
+            for attempt in range(1, max_retries + 1):
+                try:
+                    if attempt > 1:
+                        print(f"\n[重试] 第 {attempt}/{max_retries} 次尝试生成...")
+                        # 等待一小段时间再重试
+                        await page.wait_for_timeout(3000)
+                        
+                    await notebook_mgr.generate_studio_presentation()
+                    ready = await notebook_mgr.wait_for_presentation_ready()
+                    
+                    if ready:
+                        output_path = await notebook_mgr.download_presentation(dest_dir=output_dir)
+                        if os.path.exists(output_path):
+                            file_size = os.path.getsize(output_path) / (1024 * 1024)
+                            print(f"[验证] 文件成功下载并保存! 大小: {file_size:.2f} MB")
+                            success = True
+                            break
+                        else:
+                            print(f"[错误] 文件声称已下载，但在路径未找到: {output_path}")
+                    else:
+                        print(f"[警告] 第 {attempt} 次生成等待超时或失败。")
+                except Exception as e:
+                    print(f"[警告] 第 {attempt} 次尝试中发生异常: {str(e)}")
+            
+            if not success:
+                print("\n[FAIL] 演示文稿生成失败 (已达到最大重试次数)")
                 return
                 
-            output_path = await notebook_mgr.download_presentation()
-            
         else:
             # 流程 B: 后备模式 - 解析聊天文本并使用 python-pptx 生成
             print("\n[模式] 启用本地解析生成模式 (Fallback)")
@@ -112,8 +140,12 @@ async def run_ppt_generation(args):
             generator = PPTGenerator(config)
             output_path = generator.generate(slides_data, title_text=args.topic)
         
+        end_time = time.time()
+        duration = end_time - start_time
+        
         print("\n" + "="*50)
         print("  [DONE] 流程完成!")
+        print(f"  [STAT] 总耗时: {duration:.1f} 秒")
         print(f"  [FILE] 输出文件: {output_path}")
         print("="*50 + "\n")
 
