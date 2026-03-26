@@ -115,31 +115,112 @@ class NotebookManager:
         print(f"[Notebook] 发送 Prompt...")
         
         try:
-            # 1. 找到聊天输入框 (通常是底部的 textarea)
-            chat_input = await self.page.wait_for_selector("textarea[placeholder*='提示'], textarea[placeholder*='Type']", timeout=10000)
+            # 1. 找到聊天输入框 — 尝试多种选择器兼容不同 UI 版本
+            chat_input_selectors = [
+                "textarea[placeholder*='提示']",
+                "textarea[placeholder*='Type']",
+                "textarea[placeholder*='type']",
+                "textarea[placeholder*='Ask']",
+                "textarea[placeholder*='输入']",
+                "textarea[placeholder*='发送']",
+                "textarea[aria-label*='chat']",
+                "textarea[aria-label*='Chat']",
+                "textarea[aria-label*='prompt']",
+                "textarea[aria-label*='Prompt']",
+                "[contenteditable='true'][role='textbox']",
+                "[contenteditable='true'][aria-label*='chat']",
+                "[contenteditable='true'][aria-label*='Chat']",
+                "div[role='textbox']",
+                "textarea",  # 最宽泛的 fallback
+            ]
+            
+            chat_input = None
+            for selector in chat_input_selectors:
+                try:
+                    el = await self.page.wait_for_selector(selector, timeout=3000, state="visible")
+                    if el:
+                        chat_input = el
+                        print(f"[Notebook] 找到输入框 (选择器: {selector})")
+                        break
+                except TimeoutError:
+                    continue
+            
+            if not chat_input:
+                # 终极 fallback: 用 JS 在 DOM 中搜索
+                print("[Notebook] 标准选择器均未命中，尝试 JS fallback 搜索输入框...")
+                js_handle = await self.page.evaluate_handle('''() => {
+                    // 先找 textarea
+                    const ta = document.querySelector('textarea');
+                    if (ta) return ta;
+                    // 再找 contenteditable
+                    const ce = document.querySelector('[contenteditable="true"]');
+                    if (ce) return ce;
+                    // 再找 role=textbox
+                    const tb = document.querySelector('[role="textbox"]');
+                    if (tb) return tb;
+                    return null;
+                }''')
+                
+                chat_input = js_handle.as_element()
+                
+                if not chat_input:
+                    raise NotebookError("无法找到聊天输入框，NotebookLM UI 可能已更新")
+                print("[Notebook] 通过 JS fallback 找到输入框")
+            
             await chat_input.fill(prompt)
             
             # 2. 发送 (回车)
             await chat_input.press("Enter")
             print("[Notebook] Prompt 已发送，等待 AI 生成回复 (可能需要 30-60 秒)...")
 
-            # 3. 等待回复完成
-            # NotebookLM 在生成时通常会有特定的 class 或 loading 动画
-            # 较为稳妥的方式是：等待一段固定时间 + 轮询检查是否有停止按钮/重新生成按钮
+            # 3. 等待回复完成 — 轮询检测页面内容长度稳定
+            # NotebookLM 使用流式传输，networkidle 永远不会触发
+            # 动画元素(闪烁光标/时间戳)导致精确文本比对永远不匹配
+            # 改用：比较文本长度差值，连续 3 次长度变化 < 20 则认为生成完毕
+            await self.page.wait_for_timeout(8000)  # 先等 8 秒让生成启动和动画出来
             
-            await self.page.wait_for_timeout(5000) # 先等 5 秒，让生成动画出来
+            print("[Notebook] 正在等待 AI 生成完成 (内容长度稳定检测)...")
+            prev_len = 0
+            stable_count = 0
+            max_wait_ms = self.response_timeout
+            elapsed = 0
+            poll_interval = 5000  # 每 5 秒检查一次
+            length_tolerance = 20  # 允许的长度波动 (动画/时间戳导致的微小变动)
             
-            # 这是一个简单的启发式等待：等待页面不再频繁变动
-            await self.page.wait_for_load_state("networkidle", timeout=self.response_timeout)
-            
-            # 为了 MVP 简化，我们多等一会儿确保全部完成
-            await self.page.wait_for_timeout(25000)  
+            while elapsed < max_wait_ms:
+                current_text = await self.page.inner_text("body")
+                current_len = len(current_text)
+                
+                if prev_len > 100 and abs(current_len - prev_len) < length_tolerance:
+                    stable_count += 1
+                    if stable_count >= 3:
+                        print(f"[Notebook] 内容已稳定 (长度: {current_len} 字符)，认为生成完毕")
+                        break
+                else:
+                    stable_count = 0
+                    
+                prev_len = current_len
+                await self.page.wait_for_timeout(poll_interval)
+                elapsed += poll_interval
+                
+                if elapsed % 15000 == 0:
+                    print(f"[Notebook] 已等待 {elapsed/1000:.0f} 秒，当前长度 {current_len}，仍在变化...")
             
             # 4. 提取最新的一条回复
-            # 查找所有聊天气泡。通常 AI 的回复具有特定的 role 或被在特定的容器内
-            # 此处需要根据实际 DOM 结构精调。MVP 先用通用选择器抓取可见的文本。
+            response_selectors = [
+                "div[role='log'] > div",
+                ".message-bubble",
+                ".response-container",
+                "div[data-message-author-role='assistant']",
+                ".chat-message:last-child",
+            ]
             
-            elements = await self.page.query_selector_all("div[role='log'] > div, .message-bubble")
+            elements = None
+            for sel in response_selectors:
+                found = await self.page.query_selector_all(sel)
+                if found:
+                    elements = found
+                    break
             
             if not elements:
                 # Fallback: 抽取整个页面的主体内容，交给 parser 去除杂质
@@ -165,12 +246,35 @@ class NotebookManager:
         """在 Studio 面板点击生成演示文稿"""
         self._log_progress("\n准备生成演示文稿...")
         try:
-            # 找到 Studio 面板中的“演示文稿”按钮
+            # 首先确保 Studio 面板可见 — 可能需要先点击 Studio 标签页
+            studio_tab_selectors = [
+                "button:has-text('Studio')",
+                "div[role='tab']:has-text('Studio')",
+                "a:has-text('Studio')",
+                "button:has-text('studio')",
+                "mat-tab-label:has-text('Studio')",
+                "button:has-text('Studio 指南')",
+            ]
+            
+            for tab_selector in studio_tab_selectors:
+                try:
+                    tab = await self.page.wait_for_selector(tab_selector, timeout=3000, state="visible")
+                    if tab:
+                        await tab.click()
+                        self._log_progress("已点击 Studio 标签页")
+                        await self.page.wait_for_timeout(2000)
+                        break
+                except TimeoutError:
+                    continue
+            
+            # 找到 Studio 面板中的"演示文稿"按钮
             presentation_btn_selectors = [
                 "button[aria-label='演示文稿']",
                 "button[aria-label='Presentation']",
                 "mat-card:has-text('演示文稿')",
-                "mat-card:has-text('Presentation')"
+                "mat-card:has-text('Presentation')",
+                "div[role='button']:has-text('演示文稿')",
+                "div[role='button']:has-text('Presentation')",
             ]
             
             clicked = False
@@ -178,7 +282,6 @@ class NotebookManager:
                 try:
                     btn = await self.page.wait_for_selector(selector, timeout=5000, state="visible")
                     if btn:
-                        # 确保是在可见区域内
                         await btn.scroll_into_view_if_needed()
                         await btn.click()
                         clicked = True
@@ -186,6 +289,25 @@ class NotebookManager:
                         break
                 except TimeoutError:
                     continue
+            
+            if not clicked:
+                # JS fallback: 搜索所有可点击元素中包含"演示文稿"或"Presentation"的
+                self._log_progress("标准选择器未命中，尝试 JS fallback...")
+                found = await self.page.evaluate('''() => {
+                    const allElements = document.querySelectorAll('button, [role="button"], mat-card, a');
+                    for (const el of allElements) {
+                        const text = el.textContent || '';
+                        if (text.includes('演示文稿') || text.includes('Presentation')) {
+                            el.scrollIntoView();
+                            el.click();
+                            return true;
+                        }
+                    }
+                    return false;
+                }''')
+                if found:
+                    clicked = True
+                    self._log_progress("通过 JS fallback 点击了演示文稿按钮")
                     
             if not clicked:
                 raise NotebookError("无法在 Studio 面板找到「演示文稿」按钮")
